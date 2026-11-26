@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Cpu, Maximize2, Minimize2, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Cpu, Loader2, Maximize2, Minimize2, RotateCw } from "lucide-react";
 
 interface PrusaSlicerEmbedProps {
   orderId: string;
@@ -18,8 +18,20 @@ export default function PrusaSlicerEmbed({
   const [fullscreen, setFullscreen] = useState<boolean>(false);
   const [iframeKey, setIframeKey] = useState<number>(0);
 
+  const lastRequestedOrderIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
   const loadSession = useCallback(
     async (forceReload = false) => {
+      if (!forceReload && lastRequestedOrderIdRef.current === orderId) {
+        return;
+      }
+      lastRequestedOrderIdRef.current = orderId;
+
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       setLoadingPiece(true);
       setError(null);
       try {
@@ -27,6 +39,7 @@ export default function PrusaSlicerEmbed({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ orderId, forceReload }),
+          signal: controller.signal,
         });
         const data = await res.json();
         if (!res.ok) {
@@ -39,13 +52,19 @@ export default function PrusaSlicerEmbed({
           setIframeKey((k) => k + 1);
         }
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return;
+        }
+        lastRequestedOrderIdRef.current = null;
         setError(
           err instanceof Error
             ? err.message
             : "Erreur de connexion à PrusaSlicer."
         );
       } finally {
-        setLoadingPiece(false);
+        if (!controller.signal.aborted) {
+          setLoadingPiece(false);
+        }
       }
     },
     [orderId]
@@ -73,23 +92,21 @@ export default function PrusaSlicerEmbed({
             {stlFilename}
           </span>
           <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
-            PLA uniquement
+            MK4S • PLA
           </span>
-          {loadingPiece && (
-            <span className="text-[11px] text-amber-300 animate-pulse">
-              Chargement du STL…
-            </span>
-          )}
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
           <button
             type="button"
+            disabled={loadingPiece}
             onClick={() => loadSession(true)}
             title="Recharger le fichier STL dans PrusaSlicer"
-            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] border border-slate-700 transition"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-[11px] border border-slate-700 transition"
           >
-            <RotateCw className="h-3 w-3" />
+            <RotateCw
+              className={`h-3 w-3 ${loadingPiece ? "animate-spin" : ""}`}
+            />
             Recharger STL
           </button>
           <button
@@ -115,7 +132,7 @@ export default function PrusaSlicerEmbed({
         </div>
       </div>
 
-      {/* Zone interactive PrusaSlicer en direct (100% same-origin sur le port 3000) */}
+      {/* Zone interactive PrusaSlicer en direct */}
       <div className="relative flex-1 w-full h-full bg-slate-900">
         {ready && !error && (
           <iframe
@@ -126,8 +143,23 @@ export default function PrusaSlicerEmbed({
           />
         )}
 
+        {loadingPiece && !error && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-950/75 backdrop-blur-[2px]">
+            <div className="flex items-center gap-2.5 rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-xs text-slate-100 shadow-xl">
+              <Loader2 className="h-4 w-4 text-orange-400 animate-spin shrink-0" />
+              <span>
+                Chargement de{" "}
+                <strong className="font-mono text-orange-300">
+                  {stlFilename}
+                </strong>{" "}
+                dans PrusaSlicer…
+              </span>
+            </div>
+          </div>
+        )}
+
         {error && (
-          <div className="absolute inset-0 flex items-center justify-center p-6 text-center bg-slate-900">
+          <div className="absolute inset-0 z-20 flex items-center justify-center p-6 text-center bg-slate-900">
             <div className="max-w-md rounded-lg bg-rose-950/70 border border-rose-500/40 p-4 text-rose-200 text-xs space-y-2">
               <p className="font-semibold">{error}</p>
               <button

@@ -55,11 +55,32 @@ export interface UpdateOrderDecisionInput {
   improvementAction?: "QUOTE" | "DESIGNER_MEETING";
 }
 
-export type PrinterState = "IDLE" | "PRINTING" | "FINISHED" | "OFFLINE";
+export type PrinterState =
+  | "IDLE"
+  | "PRINTING"
+  | "PAUSED"
+  | "ATTENTION"
+  | "ERROR"
+  | "STOPPED"
+  | "FINISHED"
+  | "OFFLINE";
+
+export interface PrinterAlert {
+  severity: "warning" | "error";
+  code:
+    | "ATTENTION"
+    | "PAUSED"
+    | "ERROR"
+    | "STOPPED"
+    | "OFFLINE_DURING_PRINT";
+  title: string;
+  detail: string;
+}
 
 export interface PrinterStatusPayload {
   state: PrinterState;
   rawState?: string;
+  jobState?: string | null;
   mock: boolean;
   host?: string;
   tempNozzle: number | null;
@@ -71,6 +92,7 @@ export interface PrinterStatusPayload {
   activeFile: string | null;
   activeOrderId?: string | null;
   message?: string;
+  alert?: PrinterAlert | null;
 }
 
 /**

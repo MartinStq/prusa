@@ -16,6 +16,9 @@ interface EmbedRuntime {
   activeOrderId: string | null;
   sessionOpenedAtMs: number;
   startingPromise: Promise<void> | null;
+  loadLock: Promise<unknown>;
+  latestRequestSeq: number;
+  fittingInFlight: boolean;
 }
 
 const globalForEmbed = globalThis as unknown as {
@@ -32,9 +35,17 @@ function getRuntime(): EmbedRuntime {
       activeOrderId: null,
       sessionOpenedAtMs: Date.now(),
       startingPromise: null,
+      loadLock: Promise.resolve(),
+      latestRequestSeq: 0,
+      fittingInFlight: false,
     };
   }
-  return globalForEmbed.__prusaSlicerEmbed;
+  const rt = globalForEmbed.__prusaSlicerEmbed;
+  if (!rt.loadLock) rt.loadLock = Promise.resolve();
+  if (typeof rt.latestRequestSeq !== "number") rt.latestRequestSeq = 0;
+  if (typeof rt.fittingInFlight !== "boolean") rt.fittingInFlight = false;
+  if (typeof rt.sessionOpenedAtMs !== "number") rt.sessionOpenedAtMs = Date.now();
+  return rt;
 }
 
 export function getActiveSlicerSessionInfo() {
@@ -70,9 +81,10 @@ function startWindowFitterLoop(runtime: EmbedRuntime): void {
   if (runtime.fitInterval) {
     clearInterval(runtime.fitInterval);
   }
+  // Vérification légère toutes les 1.5s via 1 seul appel xwininfo (quasiment 0% CPU au repos)
   runtime.fitInterval = setInterval(() => {
     fitSlicerWindows().catch(() => {});
-  }, 450);
+  }, 1500);
   runtime.fitInterval.unref?.();
 }
 
@@ -105,6 +117,8 @@ async function ensureDisplay(): Promise<void> {
           String(VNC_PORT),
           "-AlwaysShared",
           "-AcceptSetDesktopSize=1",
+          "-FrameRate=30",
+          "-CompareFB=2",
           "-BlacklistThreshold=1000000",
           "-BlacklistTimeout=0",
         ],
@@ -135,134 +149,154 @@ async function ensureDisplay(): Promise<void> {
   return runtime.startingPromise;
 }
 
+interface ParsedWindow {
+  id: string;
+  title: string;
+  w: number;
+  h: number;
+  x: number;
+  y: number;
+}
+
 /**
- * - Ajuste la fenêtre principale de PrusaSlicer à 100% du cadre (0, 0, dispW, dispH).
- * - Contraint automatiquement toutes les boîtes de dialogue modales (ex: "Enregistrer le fichier G-code sous :")
- *   à rester entièrement visibles à l'intérieur du cadre (X >= 12, Y >= 12, largeur/hauteur <= cadre - 24),
- *   pour que les boutons "Annuler" / "Enregistrer" ne soient jamais coupés en haut ou à droite.
+ * Lit toutes les fenêtres PrusaSlicer et la résolution de :98 en 1 seule commande `xwininfo -root -tree`.
+ * Zéro subprocess supplémentaire quand les fenêtres sont déjà bien placées.
  */
-export async function fitSlicerWindows(): Promise<void> {
+async function listSlicerWindows(): Promise<{
+  dispW: number;
+  dispH: number;
+  windows: ParsedWindow[];
+} | null> {
   const env = { ...process.env, DISPLAY: DISPLAY_NUM };
-  const { stdout: geomOut } = await execFileAsync(
-    "xdotool",
-    ["getdisplaygeometry"],
-    { env, timeout: 1500 }
-  );
-  const [dispW, dispH] = geomOut.trim().split(/\s+/).map(Number);
-  if (!dispW || !dispH) return;
+  const [geomRes, treeRes] = await Promise.all([
+    execFileAsync("xdotool", ["getdisplaygeometry"], { env, timeout: 1500 }),
+    execFileAsync("xwininfo", ["-root", "-tree"], { env, timeout: 1500 }),
+  ]).catch(() => [null, null] as const);
 
-  const { stdout: idsOut } = await execFileAsync(
-    "xdotool",
-    ["search", "--onlyvisible", "--class", "PrusaSlicer"],
-    { env, timeout: 1500 }
-  ).catch(() => ({ stdout: "" }));
+  if (!geomRes || !treeRes) return null;
 
-  const ids = idsOut
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
+  const [dispW, dispH] = geomRes.stdout.trim().split(/\s+/).map(Number);
+  if (!dispW || !dispH) return null;
 
-  for (const wid of ids) {
-    const { stdout: props } = await execFileAsync(
-      "xprop",
-      ["-id", wid, "WM_TRANSIENT_FOR", "_NET_WM_WINDOW_TYPE", "WM_NAME"],
-      { env, timeout: 1500 }
-    ).catch(() => ({ stdout: "" }));
+  const windows: ParsedWindow[] = [];
+  // Ne garde que les fenêtres de premier niveau (indentation exactement 5 espaces dans xwininfo -root -tree)
+  const lineRegex =
+    /^ {5}(0x[0-9a-f]+)\s+(?:"([^"]*)"|\(has no name\)):\s+\("prusa-slicer"\s+"PrusaSlicer"\)\s+(\d+)x(\d+)([+-]\d+)([+-]\d+)/i;
 
-    const isPopup =
-      props.includes("_NET_WM_WINDOW_TYPE_MENU") ||
-      props.includes("_NET_WM_WINDOW_TYPE_POPUP_MENU") ||
-      props.includes("_NET_WM_WINDOW_TYPE_DROPDOWN_MENU") ||
-      props.includes("_NET_WM_WINDOW_TYPE_COMBO") ||
-      props.includes("_NET_WM_WINDOW_TYPE_TOOLTIP");
+  for (const line of treeRes.stdout.split("\n")) {
+    const m = lineRegex.exec(line);
+    if (!m) continue;
+    const w = Number(m[3]);
+    const h = Number(m[4]);
+    if (w < 260 || h < 160) continue;
+    windows.push({
+      id: m[1],
+      title: m[2] ?? "",
+      w,
+      h,
+      x: Number(m[5]),
+      y: Number(m[6]),
+    });
+  }
 
-    if (isPopup) {
-      continue;
-    }
+  return { dispW, dispH, windows };
+}
 
-    const isDialog =
-      (props.includes("WM_TRANSIENT_FOR(WINDOW)") &&
-        !props.includes("WM_TRANSIENT_FOR:  not found")) ||
-      props.includes("_NET_WM_WINDOW_TYPE_DIALOG");
+export async function fitSlicerWindows(): Promise<boolean> {
+  const runtime = getRuntime();
+  if (runtime.fittingInFlight) return false;
+  runtime.fittingInFlight = true;
 
-    const { stdout: winGeom } = await execFileAsync(
-      "xdotool",
-      ["getwindowgeometry", "--shell", wid],
-      { env, timeout: 1500 }
-    ).catch(() => ({ stdout: "" }));
+  try {
+    const info = await listSlicerWindows();
+    if (!info || info.windows.length === 0) return false;
 
-    const x = Number(/X=(-?\d+)/.exec(winGeom)?.[1] ?? 0);
-    const y = Number(/Y=(-?\d+)/.exec(winGeom)?.[1] ?? 0);
-    const w = Number(/WIDTH=(\d+)/.exec(winGeom)?.[1] ?? 0);
-    const h = Number(/HEIGHT=(\d+)/.exec(winGeom)?.[1] ?? 0);
+    const { dispW, dispH, windows } = info;
+    const env = { ...process.env, DISPLAY: DISPLAY_NUM };
+    let hasMainWindow = false;
 
-    if (w < 260 || h < 160) {
-      continue;
-    }
-
-    if (isDialog) {
-      const margin = 16;
-      const maxW = Math.max(400, dispW - margin * 2);
-      const maxH = Math.max(300, dispH - margin * 2);
-      const targetW = Math.min(w, maxW);
-      const targetH = Math.min(h, maxH);
-
-      const needsResize = w > maxW || h > maxH;
-      const outOfBounds =
-        x < 4 ||
-        y < 4 ||
-        x + targetW > dispW - 4 ||
-        y + targetH > dispH - 4;
-
-      if (needsResize || outOfBounds) {
-        if (needsResize) {
+    for (const win of windows) {
+      const looksMain = /PrusaSlicer-\d/i.test(win.title);
+      if (looksMain) {
+        hasMainWindow = true;
+        if (
+          win.x !== 0 ||
+          win.y !== 0 ||
+          Math.abs(win.w - dispW) > 4 ||
+          Math.abs(win.h - dispH) > 4
+        ) {
           await execFileAsync(
             "xdotool",
-            ["windowsize", wid, String(targetW), String(targetH)],
+            [
+              "windowmove",
+              win.id,
+              "0",
+              "0",
+              "windowsize",
+              win.id,
+              String(dispW),
+              String(dispH),
+            ],
             { env, timeout: 1500 }
           ).catch(() => {});
         }
+        continue;
+      }
 
-        // Relit la taille réelle après application des contraintes GTK éventuelles
-        const { stdout: afterGeom } = await execFileAsync(
-          "xdotool",
-          ["getwindowgeometry", "--shell", wid],
-          { env, timeout: 1500 }
-        ).catch(() => ({ stdout: winGeom }));
+      // Fenêtre secondaire / boîte de dialogue (ex: "Enregistrer le fichier G-code sous :")
+      const margin = 16;
+      const maxW = Math.max(400, dispW - margin * 2);
+      const maxH = Math.max(300, dispH - margin * 2);
+      const needsResize = win.w > maxW || win.h > maxH;
+      const outOfBounds =
+        win.x < 4 ||
+        win.y < 4 ||
+        win.x + win.w > dispW - 4 ||
+        win.y + win.h > dispH - 4;
 
-        const realW = Number(/WIDTH=(\d+)/.exec(afterGeom)?.[1] ?? targetW);
-        const realH = Number(/HEIGHT=(\d+)/.exec(afterGeom)?.[1] ?? targetH);
+      if (!needsResize && !outOfBounds) continue;
 
-        // Garantit toujours Y >= 0 (et X >= 0) pour que la barre supérieure GTK ("Enregistrer" / "Annuler") reste 100% visible
-        const newX = Math.max(0, Math.floor((dispW - realW) / 2));
-        const newY = Math.max(0, Math.floor((dispH - realH) / 2));
+      // Vérifie que ce n'est pas un menu déroulant / tooltip
+      const { stdout: props } = await execFileAsync(
+        "xprop",
+        ["-id", win.id, "_NET_WM_WINDOW_TYPE"],
+        { env, timeout: 1200 }
+      ).catch(() => ({ stdout: "" }));
 
+      if (
+        props.includes("_NET_WM_WINDOW_TYPE_MENU") ||
+        props.includes("_NET_WM_WINDOW_TYPE_POPUP_MENU") ||
+        props.includes("_NET_WM_WINDOW_TYPE_DROPDOWN_MENU") ||
+        props.includes("_NET_WM_WINDOW_TYPE_COMBO") ||
+        props.includes("_NET_WM_WINDOW_TYPE_TOOLTIP")
+      ) {
+        continue;
+      }
+
+      const targetW = Math.min(win.w, maxW);
+      const targetH = Math.min(win.h, maxH);
+
+      if (needsResize) {
         await execFileAsync(
           "xdotool",
-          ["windowmove", wid, String(newX), String(newY)],
+          ["windowsize", win.id, String(targetW), String(targetH)],
           { env, timeout: 1500 }
         ).catch(() => {});
       }
-      continue;
-    }
 
-    // Fenêtre principale PrusaSlicer -> plein cadre
-    if (x !== 0 || y !== 0 || Math.abs(w - dispW) > 4 || Math.abs(h - dispH) > 4) {
+      const newX = Math.max(0, Math.floor((dispW - targetW) / 2));
+      const newY = Math.max(0, Math.floor((dispH - targetH) / 2));
+
       await execFileAsync(
         "xdotool",
-        [
-          "windowmove",
-          wid,
-          "0",
-          "0",
-          "windowsize",
-          wid,
-          String(dispW),
-          String(dispH),
-        ],
+        ["windowmove", win.id, String(newX), String(newY)],
         { env, timeout: 1500 }
       ).catch(() => {});
     }
+
+    return hasMainWindow;
+  } finally {
+    runtime.fittingInFlight = false;
   }
 }
 
@@ -281,7 +315,80 @@ async function killRunningPrusaSlicerOnDisplay(): Promise<void> {
     timeout: 3000,
   }).catch(() => {});
 
-  await new Promise((r) => setTimeout(r, 250));
+  // Attend jusqu'à 2s que tous les processus prusa-slicer soient bien arrêtés
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const info = await listSlicerWindows();
+    if (!info || info.windows.length === 0) break;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
+/**
+ * Optimise PrusaSlicer.ini avant lancement :
+ * - Supprime les fenêtres pop-up parasites au démarrage (splash, login, astuces, mises à jour)
+ * - Pointe les exports G-code directement vers ./data/gcode
+ */
+async function tunePrusaSlicerIni(): Promise<void> {
+  const home = process.env.HOME;
+  if (!home) return;
+  const gcodeDir = path.resolve(process.cwd(), "data", "gcode");
+  const configRoot = path.join(
+    home,
+    ".var",
+    "app",
+    "com.prusa3d.PrusaSlicer",
+    "config",
+    "PrusaSlicer"
+  );
+  const iniPath = path.join(configRoot, "PrusaSlicer.ini");
+  const customPrinterIni = path.join(
+    configRoot,
+    "printer",
+    "Original Prusa MK4S 0.4 nozzle bon.ini"
+  );
+
+  const hasCustomPrinter = await fs
+    .access(customPrinterIni)
+    .then(() => true)
+    .catch(() => false);
+
+  try {
+    let content = await fs.readFile(iniPath, "utf-8");
+    const replacements: [RegExp, string][] = [
+      [/^show_splash_screen\s*=.*$/m, "show_splash_screen = 0"],
+      [/^show_hints\s*=.*$/m, "show_hints = 0"],
+      [/^notify_release\s*=.*$/m, "notify_release = none"],
+      [/^preset_update\s*=.*$/m, "preset_update = 0"],
+      [/^auth_login_dialog_confirmed\s*=.*$/m, "auth_login_dialog_confirmed = 1"],
+      [/^skein_directory\s*=.*$/m, `skein_directory = ${gcodeDir}`],
+      [/^last_output_path\s*=.*$/m, `last_output_path = ${gcodeDir}`],
+      ...(hasCustomPrinter
+        ? ([
+            [/^printer\s*=.*$/m, "printer = Original Prusa MK4S 0.4 nozzle bon"],
+            [/^print\s*=.*$/m, "print = 0.20mm SPEED @MK4S 0.4"],
+            [/^filament\s*=.*$/m, "filament = Prusament PLA @MK4S"],
+          ] as [RegExp, string][])
+        : []),
+    ];
+
+    let changed = false;
+    for (const [regex, nextLine] of replacements) {
+      if (regex.test(content)) {
+        const updated = content.replace(regex, nextLine);
+        if (updated !== content) {
+          content = updated;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      await fs.writeFile(iniPath, content, "utf-8");
+    }
+  } catch {
+    // Ignore si PrusaSlicer.ini n'existe pas encore
+  }
 }
 
 export async function loadOrderInEmbeddedPrusaSlicer(params: {
@@ -290,86 +397,106 @@ export async function loadOrderInEmbeddedPrusaSlicer(params: {
   stlFilename: string;
   forceReload?: boolean;
 }): Promise<{ reloaded: boolean }> {
-  await ensureDisplay();
-
   const runtime = getRuntime();
+  const mySeq = ++runtime.latestRequestSeq;
 
-  const gcodeDir = path.resolve(process.cwd(), "data", "gcode");
-  await fs.mkdir(gcodeDir, { recursive: true });
-
-  const cleanName = params.stlFilename.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const workStlPath = path.join(gcodeDir, cleanName);
-  await fs.copyFile(params.stlAbsolutePath, workStlPath);
-
-  const env = { ...process.env, DISPLAY: DISPLAY_NUM };
-  const { stdout: existingWin } = await execFileAsync(
-    "xdotool",
-    ["search", "--onlyvisible", "--class", "PrusaSlicer"],
-    { env, timeout: 1500 }
-  ).catch(() => ({ stdout: "" }));
-
-  const isWindowAlive = Boolean(existingWin.trim());
-
-  if (
-    !params.forceReload &&
-    isWindowAlive &&
-    runtime.currentStlPath === params.stlAbsolutePath
-  ) {
-    if (params.orderId && runtime.activeOrderId !== params.orderId) {
-      runtime.activeOrderId = params.orderId;
-      runtime.sessionOpenedAtMs = Date.now();
+  const task = async (): Promise<{ reloaded: boolean }> => {
+    // Si une requête plus récente est déjà arrivée entre-temps, on abandonne celle-ci
+    if (mySeq < runtime.latestRequestSeq) {
+      return { reloaded: false };
     }
-    await fitSlicerWindows().catch(() => {});
-    return { reloaded: false };
-  }
 
-  await killRunningPrusaSlicerOnDisplay();
+    await ensureDisplay();
 
-  const workspaceDir = process.cwd();
-  const cleanEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    DISPLAY: DISPLAY_NUM,
-    GDK_BACKEND: "x11",
-    WAYLAND_DISPLAY: "",
+    const gcodeDir = path.resolve(process.cwd(), "data", "gcode");
+    await fs.mkdir(gcodeDir, { recursive: true });
+
+    const cleanName = params.stlFilename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const workStlPath = path.join(gcodeDir, cleanName);
+    await fs.copyFile(params.stlAbsolutePath, workStlPath);
+
+    const existing = await listSlicerWindows();
+    const isWindowAlive = Boolean(existing && existing.windows.length > 0);
+
+    if (
+      !params.forceReload &&
+      isWindowAlive &&
+      runtime.currentStlPath === params.stlAbsolutePath
+    ) {
+      if (params.orderId && runtime.activeOrderId !== params.orderId) {
+        runtime.activeOrderId = params.orderId;
+        runtime.sessionOpenedAtMs = Date.now();
+      }
+      await fitSlicerWindows().catch(() => {});
+      return { reloaded: false };
+    }
+
+    await killRunningPrusaSlicerOnDisplay();
+    await tunePrusaSlicerIni();
+
+    if (mySeq < runtime.latestRequestSeq) {
+      return { reloaded: false };
+    }
+
+    const workspaceDir = process.cwd();
+    const cleanEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      DISPLAY: DISPLAY_NUM,
+      GDK_BACKEND: "x11",
+      WAYLAND_DISPLAY: "",
+      // Optimisation OpenGL compatible Xtigervnc (4 threads physiques + pas de vérif d'erreur GL)
+      LP_NUM_THREADS: "4",
+      MESA_NO_ERROR: "1",
+    };
+    delete cleanEnv.GIO_EXTRA_MODULES;
+    delete cleanEnv.GTK_PATH;
+    delete cleanEnv.GTK_IM_MODULE_FILE;
+
+    const proc = spawn(
+      "flatpak",
+      [
+        "run",
+        "--nosocket=wayland",
+        "--socket=x11",
+        `--env=DISPLAY=${DISPLAY_NUM}`,
+        "--env=GDK_BACKEND=x11",
+        "--env=LP_NUM_THREADS=4",
+        "--env=MESA_NO_ERROR=1",
+        "--unset-env=WAYLAND_DISPLAY",
+        "--unset-env=GIO_EXTRA_MODULES",
+        "--unset-env=GTK_PATH",
+        "--unset-env=GTK_IM_MODULE_FILE",
+        `--filesystem=${workspaceDir}`,
+        "--filesystem=/tmp",
+        "com.prusa3d.PrusaSlicer",
+        workStlPath,
+      ],
+      {
+        env: cleanEnv,
+        stdio: "ignore",
+        detached: true,
+      }
+    );
+    proc.unref();
+    runtime.slicerProc = proc;
+    runtime.currentStlPath = params.stlAbsolutePath;
+    runtime.activeOrderId = params.orderId ?? runtime.activeOrderId;
+    runtime.sessionOpenedAtMs = Date.now();
+
+    // Attend que la fenêtre principale PrusaSlicer soit réellement prête et calée (max 4.5s)
+    const waitDeadline = Date.now() + 4500;
+    while (Date.now() < waitDeadline) {
+      if (mySeq < runtime.latestRequestSeq) break;
+      const mapped = await fitSlicerWindows().catch(() => false);
+      if (mapped) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    return { reloaded: true };
   };
-  delete cleanEnv.GIO_EXTRA_MODULES;
-  delete cleanEnv.GTK_PATH;
-  delete cleanEnv.GTK_IM_MODULE_FILE;
 
-  const proc = spawn(
-    "flatpak",
-    [
-      "run",
-      "--nosocket=wayland",
-      "--socket=x11",
-      `--env=DISPLAY=${DISPLAY_NUM}`,
-      "--env=GDK_BACKEND=x11",
-      "--unset-env=WAYLAND_DISPLAY",
-      "--unset-env=GIO_EXTRA_MODULES",
-      "--unset-env=GTK_PATH",
-      "--unset-env=GTK_IM_MODULE_FILE",
-      `--filesystem=${workspaceDir}`,
-      "--filesystem=/tmp",
-      "com.prusa3d.PrusaSlicer",
-      workStlPath,
-    ],
-    {
-      env: cleanEnv,
-      stdio: "ignore",
-      detached: true,
-    }
-  );
-  proc.unref();
-  runtime.slicerProc = proc;
-  runtime.currentStlPath = params.stlAbsolutePath;
-  runtime.activeOrderId = params.orderId ?? runtime.activeOrderId;
-  runtime.sessionOpenedAtMs = Date.now();
-
-  for (const delay of [1500, 3000, 4800]) {
-    setTimeout(() => {
-      fitSlicerWindows().catch(() => {});
-    }, delay);
-  }
-
-  return { reloaded: true };
+  // Sérialisation stricte (mutex) : impossible de lancer 2 PrusaSlicer en parallèle
+  const chained = runtime.loadLock.then(task, task);
+  runtime.loadLock = chained.catch(() => {});
+  return chained;
 }

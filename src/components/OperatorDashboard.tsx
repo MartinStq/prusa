@@ -109,19 +109,44 @@ export default function OperatorDashboard({
     setSelectedId(created.id);
   };
 
+  const handleSimulateOrders = async (mode: "single" | "batch" | "clear") => {
+    const res = await fetch("/api/orders/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, count: mode === "batch" ? 3 : 1 }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+
+    if (mode === "clear") {
+      setOrders([]);
+      setStatusFilter("TO_ANALYZE");
+      setSelectedId(null);
+      return;
+    }
+
+    if (Array.isArray(data.created) && data.created.length > 0) {
+      const createdList = data.created as PrintOrder[];
+      setOrders((prev) => [...createdList.reverse(), ...prev]);
+      setStatusFilter("TO_ANALYZE");
+      setSelectedId(createdList[0].id);
+    }
+  };
+
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-slate-100">
       {/* 1. BARRE DU HAUT : STATUT PRUSA EN DIRECT */}
       <PrinterStatusBar
         refreshTrigger={printerRefreshKey}
         onOpenNewOrder={() => setNewModalOpen(true)}
+        onSimulateOrders={handleSimulateOrders}
         onPrinterFinished={reloadOrders}
       />
 
-      {/* CORPS EN 3 COLONNES */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 min-h-0 overflow-hidden">
+      {/* CORPS EN 3 COLONNES (flex fixe sur les côtés pour maximiser PrusaSlicer) */}
+      <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden">
         {/* 2. COLONNE GAUCHE : FILE D'ATTENTE (sans filtre "Toutes") */}
-        <aside className="lg:col-span-2 border-r border-slate-200 bg-white flex flex-col min-h-0">
+        <aside className="w-full lg:w-[265px] shrink-0 border-r border-slate-200 bg-white flex flex-col min-h-0">
           <div className="p-3 border-b border-slate-200 space-y-2.5">
             <div className="flex items-center justify-between">
               <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -221,7 +246,7 @@ export default function OperatorDashboard({
         </aside>
 
         {/* 3. ZONE CENTRALE : VRAI PRUSASLICER INTÉGRÉ */}
-        <main className="lg:col-span-7 p-3 flex flex-col gap-2.5 min-h-0 overflow-hidden">
+        <main className="flex-1 min-w-0 p-3 flex flex-col gap-2.5 min-h-0 overflow-hidden">
           {selectedOrder ? (
             <>
               {/* En-tête fiche client + Télécharger le STL */}
@@ -290,7 +315,7 @@ export default function OperatorDashboard({
         </main>
 
         {/* 4. COLONNE DROITE : DÉCISION & ACTIONS */}
-        <section className="lg:col-span-3 border-l border-slate-200 bg-white flex flex-col min-h-0">
+        <section className="w-full lg:w-[325px] shrink-0 border-l border-slate-200 bg-white flex flex-col min-h-0">
           {selectedOrder ? (
             <DecisionPanel
               order={selectedOrder}

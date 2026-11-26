@@ -57,7 +57,16 @@ export async function GET(
         "gcode",
         order.gcodeFilename
       );
-      const parsed = await parsePrusaGcodeMetadata(existingPath);
+      const sentPath = path.resolve(
+        process.cwd(),
+        "data",
+        "gcode",
+        "sent",
+        order.gcodeFilename
+      );
+      const parsed =
+        (await parsePrusaGcodeMetadata(existingPath)) ??
+        (await parsePrusaGcodeMetadata(sentPath));
       if (parsed) {
         return NextResponse.json({
           synced: true,

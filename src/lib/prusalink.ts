@@ -1,8 +1,13 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 import { updateOrderStatus } from "@/services/orders";
-import type { PrinterState, PrinterStatusPayload } from "@/types/orders";
+import type {
+  PrinterAlert,
+  PrinterState,
+  PrinterStatusPayload,
+} from "@/types/orders";
 
 interface MockPrinterSession {
   state: PrinterState;
@@ -179,24 +184,76 @@ function getCandidateHosts(): string[] {
   return [];
 }
 
-function normalizePrusaState(rawState?: string): PrinterState {
-  if (!rawState) return "OFFLINE";
-  const upper = rawState.toUpperCase();
-  if (upper === "PRINTING" || upper === "PAUSED" || upper === "BUSY") {
-    return "PRINTING";
-  }
-  if (upper === "FINISHED") {
-    return "FINISHED";
-  }
-  if (
-    upper === "IDLE" ||
-    upper === "READY" ||
-    upper === "STOPPED" ||
-    upper === "ATTENTION"
-  ) {
-    return "IDLE";
-  }
+function normalizePrusaState(
+  rawPrinterState?: string,
+  rawJobState?: string | null
+): PrinterState {
+  const p = (rawPrinterState ?? "").toUpperCase();
+  const j = (rawJobState ?? "").toUpperCase();
+
+  if (p === "ERROR" || j === "ERROR") return "ERROR";
+  if (p === "ATTENTION" || j === "ATTENTION") return "ATTENTION";
+  if (p === "PAUSED" || j === "PAUSED") return "PAUSED";
+  if (p === "STOPPED" || j === "STOPPED") return "STOPPED";
+  if (p === "PRINTING" || p === "BUSY" || j === "PRINTING") return "PRINTING";
+  if (p === "FINISHED" || j === "FINISHED") return "FINISHED";
+  if (p === "IDLE" || p === "READY") return "IDLE";
   return "OFFLINE";
+}
+
+function buildPrinterAlert(params: {
+  state: PrinterState;
+  rawState?: string;
+  jobState?: string | null;
+  activeFile: string | null;
+  progress: number | null;
+}): PrinterAlert | null {
+  const fileSuffix = params.activeFile ? ` (${params.activeFile})` : "";
+  const progSuffix =
+    params.progress !== null ? ` à ${params.progress}%` : "";
+
+  if (params.state === "ERROR") {
+    return {
+      severity: "error",
+      code: "ERROR",
+      title: "Erreur critique sur la Prusa",
+      detail: `L'imprimante a signalé une erreur${fileSuffix}. Vérifiez immédiatement l'écran de la Prusa.`,
+    };
+  }
+
+  if (params.state === "ATTENTION") {
+    const isPausedJob = (params.jobState ?? "").toUpperCase() === "PAUSED";
+    return {
+      severity: "warning",
+      code: "ATTENTION",
+      title: isPausedJob
+        ? "Impression interrompue — Intervention requise (changement de filament / écran)"
+        : "Intervention requise sur l'écran de la Prusa (ATTENTION)",
+      detail: isPausedJob
+        ? `La Prusa est en attente sur son écran${fileSuffix}${progSuffix} (changement de filament, fin de bobine ou confirmation requise).`
+        : `Un message sur l'écran de la Prusa attend une confirmation de l'opérateur${fileSuffix}.`,
+    };
+  }
+
+  if (params.state === "PAUSED") {
+    return {
+      severity: "warning",
+      code: "PAUSED",
+      title: "Impression en pause (PAUSED)",
+      detail: `L'impression${fileSuffix}${progSuffix} est mise en pause (changement de filament ou pause manuelle).`,
+    };
+  }
+
+  if (params.state === "STOPPED") {
+    return {
+      severity: "error",
+      code: "STOPPED",
+      title: "Impression stoppée avant la fin (STOPPED)",
+      detail: `L'impression${fileSuffix}${progSuffix} a été arrêtée.`,
+    };
+  }
+
+  return null;
 }
 
 export async function setMockPrinterState(
@@ -348,7 +405,9 @@ export async function fetchPrusaStatus(): Promise<PrinterStatusPayload> {
       const statusJob = statusData?.job ?? {};
 
       const rawState: string | undefined = printer.state ?? jobData?.state;
-      const state = normalizePrusaState(rawState);
+      const jobState: string | null =
+        typeof jobData?.state === "string" ? jobData.state : null;
+      const state = normalizePrusaState(printer.state, jobState);
 
       const progressRaw = statusJob.progress ?? jobData?.progress ?? null;
       const progress =
@@ -364,9 +423,18 @@ export async function fetchPrusaStatus(): Promise<PrinterStatusPayload> {
       const activeFile =
         jobData?.file?.display_name ?? jobData?.file?.name ?? null;
 
+      const alert = buildPrinterAlert({
+        state,
+        rawState,
+        jobState,
+        activeFile,
+        progress,
+      });
+
       return {
         state,
         rawState,
+        jobState,
         mock: false,
         host,
         tempNozzle:
@@ -381,6 +449,7 @@ export async function fetchPrusaStatus(): Promise<PrinterStatusPayload> {
         progress,
         timeRemainingSeconds,
         activeFile,
+        alert,
       };
     } catch {
       lastErrorMsg = `Prusa MK4 (${host}) hors ligne ou sur un autre sous-réseau Wi-Fi`;
@@ -399,6 +468,155 @@ export async function fetchPrusaStatus(): Promise<PrinterStatusPayload> {
     timeRemainingSeconds: null,
     activeFile: null,
     message: lastErrorMsg,
+  };
+}
+
+/**
+ * Récupère le challenge Digest (`WWW-Authenticate: Digest ...`) via un GET léger sans corps
+ * afin d'envoyer les gros fichiers `.bgcode`/`.gcode` en UNE SEULE passe (2x plus rapide,
+ * sans gaspiller de temps à envoyer plusieurs Mo avant un 401).
+ */
+async function prefetchDigestChallenge(host: string): Promise<string | null> {
+  try {
+    const res = await fetch(`http://${host}/api/v1/status`, {
+      method: "GET",
+      cache: "no-store",
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.status === 401) {
+      return res.headers.get("www-authenticate");
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Envoi HTTP PUT streaming via `node:http` avec timeout généreux (10 minutes d'inactivité)
+ * adapté au débit Wi-Fi ESP32 -> clé USB des Prusa MK4/MK4S (~100 Ko/s) pour les gros fichiers (> 5 Mo).
+ */
+function putBufferToPrusa(params: {
+  host: string;
+  uriPath: string;
+  headers: Record<string, string>;
+  body: Buffer;
+  timeoutMs?: number;
+}): Promise<{
+  statusCode: number;
+  bodyText: string;
+  wwwAuthenticate: string | null;
+}> {
+  const timeoutMs = params.timeoutMs ?? 10 * 60 * 1000;
+  const [hostname, portStr] = params.host.split(":");
+  const port = portStr ? parseInt(portStr, 10) : 80;
+
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname,
+        port,
+        path: params.uriPath,
+        method: "PUT",
+        headers: params.headers,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const wwwHeader = res.headers["www-authenticate"];
+          resolve({
+            statusCode: res.statusCode ?? 0,
+            bodyText: Buffer.concat(chunks).toString("utf-8"),
+            wwwAuthenticate: Array.isArray(wwwHeader)
+              ? wwwHeader[0] ?? null
+              : wwwHeader ?? null,
+          });
+        });
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(
+        new Error(
+          "Délai dépassé lors du transfert vers la Prusa (inactivité > 10 min). Vérifiez la connexion Wi-Fi de l'imprimante."
+        )
+      );
+    });
+
+    req.on("error", reject);
+    req.end(params.body);
+  });
+}
+
+async function uploadBufferWithAuth(
+  host: string,
+  uriPath: string,
+  fileBuffer: Buffer
+): Promise<{ statusCode: number; bodyText: string }> {
+  const apiKey = process.env.PRUSA_API_KEY?.trim() ?? "";
+  const username = process.env.PRUSA_USER?.trim() || "maker";
+
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": String(fileBuffer.byteLength),
+    "Print-After-Upload": "?1",
+    Overwrite: "?1",
+  };
+
+  // Pré-récupère le nonce Digest sur un petit GET avant d'envoyer plusieurs Mo
+  const challenge = apiKey ? await prefetchDigestChallenge(host) : null;
+  const precomputedDigest =
+    challenge && apiKey
+      ? buildDigestAuthHeader({
+          wwwAuthenticate: challenge,
+          method: "PUT",
+          uriPath,
+          username,
+          password: apiKey,
+        })
+      : null;
+
+  const firstHeaders: Record<string, string> = precomputedDigest
+    ? { ...baseHeaders, Authorization: precomputedDigest }
+    : apiKey
+    ? { ...baseHeaders, "X-Api-Key": apiKey }
+    : baseHeaders;
+
+  const firstRes = await putBufferToPrusa({
+    host,
+    uriPath,
+    headers: firstHeaders,
+    body: fileBuffer,
+  });
+
+  // Si le nonce a expiré entre-temps (401 Digest), on réessaie une fois avec le nouveau nonce
+  if (firstRes.statusCode === 401 && firstRes.wwwAuthenticate && apiKey) {
+    const retryDigest = buildDigestAuthHeader({
+      wwwAuthenticate: firstRes.wwwAuthenticate,
+      method: "PUT",
+      uriPath,
+      username,
+      password: apiKey,
+    });
+    if (retryDigest) {
+      const retryRes = await putBufferToPrusa({
+        host,
+        uriPath,
+        headers: { ...baseHeaders, Authorization: retryDigest },
+        body: fileBuffer,
+      });
+      return {
+        statusCode: retryRes.statusCode,
+        bodyText: retryRes.bodyText,
+      };
+    }
+  }
+
+  return {
+    statusCode: firstRes.statusCode,
+    bodyText: firstRes.bodyText,
   };
 }
 
@@ -421,9 +639,10 @@ export async function uploadGcodeAndStartPrint(params: {
     base.endsWith(suffix) ? "" : suffix
   }${ext}`;
 
-  const gcodeDir = path.join(process.cwd(), "data", "gcode");
-  await fs.mkdir(gcodeDir, { recursive: true });
-  const localPath = path.join(gcodeDir, safeFilename);
+  // Archive la copie envoyée dans ./data/gcode/sent/ pour ne pas polluer les exports frais de PrusaSlicer
+  const sentDir = path.join(process.cwd(), "data", "gcode", "sent");
+  await fs.mkdir(sentDir, { recursive: true });
+  const localPath = path.join(sentDir, safeFilename);
   await fs.writeFile(localPath, params.fileBuffer);
 
   if (isPrusaMockEnabled()) {
@@ -440,7 +659,7 @@ export async function uploadGcodeAndStartPrint(params: {
     return {
       mock: true,
       filename: safeFilename,
-      localPath: `./data/gcode/${safeFilename}`,
+      localPath: `./data/gcode/sent/${safeFilename}`,
       order: updatedOrder,
     };
   }
@@ -484,22 +703,15 @@ export async function uploadGcodeAndStartPrint(params: {
 
   for (const host of hosts) {
     try {
-      const response = await prusaFetch(host, uriPath, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          "Content-Length": String(params.fileBuffer.byteLength),
-          "Print-After-Upload": "?1",
-          Overwrite: "?1",
-        },
-        body: new Uint8Array(params.fileBuffer),
-        timeoutMs: 45000,
-      });
+      const response = await uploadBufferWithAuth(
+        host,
+        uriPath,
+        params.fileBuffer
+      );
 
-      if (!response.ok) {
-        const details = await response.text().catch(() => "");
+      if (response.statusCode < 200 || response.statusCode >= 300) {
         throw new Error(
-          `Échec PrusaLink sur ${host} (HTTP ${response.status}) ${details}`.trim()
+          `Échec PrusaLink sur ${host} (HTTP ${response.statusCode}) ${response.bodyText}`.trim()
         );
       }
 
@@ -511,7 +723,7 @@ export async function uploadGcodeAndStartPrint(params: {
         mock: false,
         host,
         filename: safeFilename,
-        localPath: `./data/gcode/${safeFilename}`,
+        localPath: `./data/gcode/sent/${safeFilename}`,
         order: updatedOrder,
       };
     } catch (err) {

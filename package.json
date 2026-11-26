@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node server.mjs",
     "build": "next build",
-    "start": "NODE_ENV=production node server.mjs",
+    "start": "NODE_ENV=production NODE_OPTIONS=--max-old-space-size=384 node server.mjs",
     "lint": "next lint",
     "db:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",

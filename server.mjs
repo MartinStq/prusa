@@ -85,6 +85,9 @@ const EMBED_HTML = `<!DOCTYPE html>
         rfb.resizeSession = true;
         rfb.clipViewport = false;
         rfb.showDotCursor = false;
+        // Encodage Tight/JPEG rapide (libjpeg-turbo) : ~35 Ko/image au lieu de 3.4 Mo brut -> 0 latence souris
+        rfb.compressionLevel = 1;
+        rfb.qualityLevel = 5;
         rfb.background = '#0f172a';
 
         rfb.addEventListener('connect', () => {
@@ -94,10 +97,10 @@ const EMBED_HTML = `<!DOCTYPE html>
         rfb.addEventListener('disconnect', () => {
           overlayEl.textContent = 'Reconnexion à PrusaSlicer…';
           overlayEl.classList.remove('hidden');
-          reconnectTimer = setTimeout(connect, 900);
+          reconnectTimer = setTimeout(connect, 1500);
         });
       } catch (err) {
-        reconnectTimer = setTimeout(connect, 900);
+        reconnectTimer = setTimeout(connect, 1500);
       }
     }
 
@@ -205,6 +208,11 @@ server.on("upgrade", (req, socket, head) => {
 
   upgradeHandler(req, socket, head);
 });
+
+// Timeout généreux (15 min) pour les gros fichiers .stl et les longs transferts Wi-Fi .bgcode vers la Prusa
+server.requestTimeout = 15 * 60 * 1000;
+server.headersTimeout = 60 * 1000;
+server.keepAliveTimeout = 65 * 1000;
 
 server.listen(port, () => {
   console.log(`> Prusa Pilot prêt sur http://${hostname}:${port}`);

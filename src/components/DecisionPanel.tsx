@@ -110,11 +110,12 @@ export default function DecisionPanel({
         if (!data.synced || !data.slice || cancelled) return;
 
         const slice = data.slice as SyncedSliceInfo;
-        setSyncedSlice(slice);
 
-        // Dès qu'un nouveau tranchage est exporté dans PrusaSlicer, met à jour automatiquement le poids et les infos
+        // Ne met à jour l'état React que si un nouvel export a été détecté (évite les re-renders toutes les 2s)
         if (slice.mtimeMs > lastAppliedMtimeRef.current) {
           lastAppliedMtimeRef.current = slice.mtimeMs;
+          setSyncedSlice(slice);
+
           if (order.status === "TO_ANALYZE") {
             setWeightInput(String(slice.weightGrams));
 
@@ -851,6 +852,18 @@ export default function DecisionPanel({
             >
               <CheckCircle2 className="h-4 w-4" />
               Marquer l&apos;impression comme terminée
+            </button>
+
+            
+            {/* AJOUT : Bouton Impression ratée */}
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => updateStatus("APPROVED")}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 text-xs font-semibold py-2.5 px-4 transition"
+            >
+              <RotateCcw className="h-4 w-4" />
+              Impression ratée (retour Validé client)
             </button>
           </div>
         )}
