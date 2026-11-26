@@ -1,0 +1,26 @@
+# Dependencies
+/node_modules
+
+# Next.js build
+/.next/
+/out/
+
+# Environment variables
+.env
+.env*.local
+
+# SQLite databases
+prisma/*.db
+prisma/*.db-journal
+
+# Local 3D print files (generated / uploaded)
+/data/stl/*.stl
+/data/gcode/*.gcode
+/data/gcode/*.bgcode
+
+# Misc
+.DS_Store
+*.pem
+npm-debug.log*
+next-env.d.ts
+*.tsbuildinfo
