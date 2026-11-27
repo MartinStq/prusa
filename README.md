@@ -24,17 +24,17 @@ Application web locale (Next.js App Router, TypeScript, Tailwind CSS, Prisma + S
    ```
    *(Télécharge automatiquement Node.js 20 portable et PrusaSlicer Windows portable, installe le profil `Original Prusa MK4S 0.4 nozzle bon` + `Prusament PLA`, crée `.env`, initialise SQLite et compile l'application.)*
 4. **Si le build `.next` n'est pas terminé (`Could not find a production build in the '.next' directory`) :**
-   Dans PowerShell ouvert dans le dossier `prusa`, relancez la compilation :
+   Dans PowerShell ouvert dans le dossier du projet (celui qui contient `package.json`), relancez la compilation avec `npm.cmd` :
    ```powershell
-   $env:Path = "$PWD\vendor\node;$env:Path"; npm run build
+   $env:Path = "$PWD\vendor\node;$env:Path"; .\vendor\node\npm.cmd run build
    ```
    *(Et si `npm install` s'était interrompu avant :)*
    ```powershell
-   $env:Path = "$PWD\vendor\node;$env:Path"; npm install --no-audit --no-fund --loglevel=http; npx prisma migrate deploy; npm run db:seed; npm run build
+   $env:Path = "$PWD\vendor\node;$env:Path"; .\vendor\node\npm.cmd install --no-audit --no-fund --loglevel=http; .\vendor\node\npx.cmd prisma migrate deploy; .\vendor\node\npm.cmd run db:seed; .\vendor\node\npm.cmd run build
    ```
-5. **Lancement au quotidien** — double-cliquez sur **`Lancer-Prusa-Pilot.bat`** sur votre Bureau *(ou dans PowerShell ouvert dans le dossier `prusa`)* :
+5. **Lancement au quotidien** — double-cliquez sur **`Lancer-Prusa-Pilot.bat`** sur votre Bureau *(ou dans PowerShell ouvert dans le dossier du projet)* :
    ```powershell
-   $env:Path = "$PWD\vendor\node;$env:Path"; Start-Process "http://localhost:3000"; node server.mjs --prod
+   $env:Path = "$PWD\vendor\node;$env:Path"; Start-Process "http://localhost:3000"; .\vendor\node\node.exe server.mjs --prod
    ```
 
 ---
