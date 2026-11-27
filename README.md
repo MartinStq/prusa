@@ -16,14 +16,22 @@ Application web locale (Next.js App Router, TypeScript, Tailwind CSS, Prisma + S
 
 ## Installation 100 % Windows (zéro WSL, zéro droit admin)
 
-1. Téléchargez le dépôt sur le PC Windows (en ZIP décompressé ou via `git clone https://github.com/MartinStq/prusa.git`).
-2. Ouvrez le dossier `windows\` et **double-cliquez sur `1-Installer-sur-Windows.bat`** :
-   - Télécharge automatiquement **Node.js 20 portable** (si absent) dans `vendor\node\`.
-   - Télécharge automatiquement **PrusaSlicer Windows portable** (si absent) dans `vendor\prusaslicer\`.
-   - Installe votre profil **Original Prusa MK4S 0.4 nozzle bon** + **Prusament PLA**.
-   - Configure `.env`, initialise la base SQLite et compile l'application.
-   - Crée un raccourci **`Lancer-Prusa-Pilot.bat`** directement sur votre **Bureau Windows**.
-3. Au quotidien, **double-cliquez simplement sur `Lancer-Prusa-Pilot.bat`** sur votre Bureau : le serveur démarre et ouvre **http://localhost:3000** dans votre navigateur !
+1. Téléchargez le dépôt sur le PC Windows (**Code → Download ZIP** puis **clic droit sur le ZIP → Extraire tout…**, ou via `git clone https://github.com/MartinStq/prusa.git`).
+2. **Méthode rapide :** ouvrez le dossier `windows\` et double-cliquez sur **`1-Installer-sur-Windows.bat`**.
+3. **Si Windows 10 affiche *« Cette application ne peut pas s'exécuter sur votre PC »* sur le `.bat` :**
+   - Ouvrez le dossier décompressé `prusa`.
+   - Cliquez dans la **barre d'adresse en haut de l'Explorateur Windows**, tapez **`powershell`** puis appuyez sur **`Entrée`**.
+   - Collez cette commande et appuyez sur **`Entrée`** :
+     ```powershell
+     powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\1-Installer-sur-Windows.ps1
+     ```
+4. L'installateur télécharge automatiquement **Node.js 20 portable** (`vendor\node\`) et **PrusaSlicer Windows portable** (`vendor\prusaslicer\`), installe votre profil **Original Prusa MK4S 0.4 nozzle bon** + **Prusament PLA**, initialise SQLite, compile le site et crée **`Lancer-Prusa-Pilot.bat`** sur le Bureau.
+5. **Pour lancer au quotidien :**
+   - Double-cliquez sur **`Lancer-Prusa-Pilot.bat`** sur votre Bureau.
+   - *(Ou dans PowerShell ouvert dans le dossier `prusa`, si les `.bat` sont bloqués :)*
+     ```powershell
+     $env:Path = "$PWD\vendor\node;$env:Path"; Start-Process "http://localhost:3000"; node server.mjs --prod
+     ```
 
 ---
 
