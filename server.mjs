@@ -5,7 +5,8 @@ import path from "node:path";
 import next from "next";
 import { WebSocketServer } from "ws";
 
-const dev = process.env.NODE_ENV !== "production";
+const dev =
+  process.env.NODE_ENV !== "production" && !process.argv.includes("--prod");
 const hostname = "localhost";
 const port = parseInt(process.env.PORT || "3000", 10);
 const VNC_PORT = 5998;

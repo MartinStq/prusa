@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cpu, Loader2, Maximize2, Minimize2, RotateCw } from "lucide-react";
+import {
+  Cpu,
+  ExternalLink,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  RotateCw,
+} from "lucide-react";
+import StlViewer from "@/components/StlViewer";
 
 interface PrusaSlicerEmbedProps {
   orderId: string;
@@ -12,8 +20,11 @@ export default function PrusaSlicerEmbed({
   orderId,
   stlFilename,
 }: PrusaSlicerEmbedProps) {
+  const [mode, setMode] = useState<"embedded" | "native-window" | null>(null);
   const [ready, setReady] = useState<boolean>(false);
   const [loadingPiece, setLoadingPiece] = useState<boolean>(true);
+  const [openingNative, setOpeningNative] = useState<boolean>(false);
+  const [nativeToast, setNativeToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState<boolean>(false);
   const [iframeKey, setIframeKey] = useState<number>(0);
@@ -34,6 +45,7 @@ export default function PrusaSlicerEmbed({
 
       setLoadingPiece(true);
       setError(null);
+      setNativeToast(null);
       try {
         const res = await fetch("/api/slicer/session", {
           method: "POST",
@@ -44,11 +56,14 @@ export default function PrusaSlicerEmbed({
         const data = await res.json();
         if (!res.ok) {
           throw new Error(
-            data.error ?? "Impossible de démarrer PrusaSlicer intégré."
+            data.error ?? "Impossible de démarrer PrusaSlicer."
           );
         }
+        setMode(
+          data.mode === "native-window" ? "native-window" : "embedded"
+        );
         setReady(true);
-        if (forceReload) {
+        if (forceReload && data.mode !== "native-window") {
           setIframeKey((k) => k + 1);
         }
       } catch (err) {
@@ -74,6 +89,32 @@ export default function PrusaSlicerEmbed({
     loadSession(false);
   }, [loadSession]);
 
+  const handleOpenNativePrusaSlicer = async () => {
+    setOpeningNative(true);
+    setError(null);
+    setNativeToast(null);
+    try {
+      const res = await fetch(`/api/orders/${orderId}/slicer/open`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "Impossible d'ouvrir PrusaSlicer.");
+      }
+      setNativeToast(
+        "PrusaSlicer ouvert ! Cliquez sur « Exporter le G-code » (Entrée) : le poids PLA et le prix TVAC se rempliront automatiquement à droite."
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Erreur lors de l'ouverture de PrusaSlicer."
+      );
+    } finally {
+      setOpeningNative(false);
+    }
+  };
+
   return (
     <div
       className={
@@ -82,8 +123,8 @@ export default function PrusaSlicerEmbed({
           : "relative flex-1 min-h-[440px] w-full flex flex-col rounded-xl overflow-hidden border border-slate-300 bg-slate-900 shadow-inner"
       }
     >
-      {/* Barre d'outil fine de l'intégration PrusaSlicer */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-slate-950 text-slate-200 border-b border-slate-800 text-xs shrink-0">
+      {/* Barre d'outil PrusaSlicer */}
+      <div className="flex items-center justify-between px-3 py-1.5 bg-slate-950 text-slate-200 border-b border-slate-800 text-xs shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <Cpu className="h-3.5 w-3.5 text-orange-500 shrink-0" />
           <span className="font-semibold text-white">PrusaSlicer</span>
@@ -97,23 +138,38 @@ export default function PrusaSlicerEmbed({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            type="button"
-            disabled={loadingPiece}
-            onClick={() => loadSession(true)}
-            title="Recharger le fichier STL dans PrusaSlicer"
-            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-[11px] border border-slate-700 transition"
-          >
-            <RotateCw
-              className={`h-3 w-3 ${loadingPiece ? "animate-spin" : ""}`}
-            />
-            Recharger STL
-          </button>
+          {mode === "native-window" ? (
+            <button
+              type="button"
+              disabled={openingNative}
+              onClick={handleOpenNativePrusaSlicer}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-60 text-white text-[11px] font-semibold transition shadow-sm"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              {openingNative
+                ? "Ouverture de PrusaSlicer…"
+                : "Ouvrir dans PrusaSlicer"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={loadingPiece}
+              onClick={() => loadSession(true)}
+              title="Recharger le fichier STL dans PrusaSlicer"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-[11px] border border-slate-700 transition"
+            >
+              <RotateCw
+                className={`h-3 w-3 ${loadingPiece ? "animate-spin" : ""}`}
+              />
+              Recharger STL
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setFullscreen((f) => !f)}
             title={
-              fullscreen ? "Quitter le plein écran" : "Agrandir PrusaSlicer"
+              fullscreen ? "Quitter le plein écran" : "Agrandir la vue"
             }
             className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] border border-slate-700 transition"
           >
@@ -132,9 +188,29 @@ export default function PrusaSlicerEmbed({
         </div>
       </div>
 
-      {/* Zone interactive PrusaSlicer en direct */}
-      <div className="relative flex-1 w-full h-full bg-slate-900">
-        {ready && !error && (
+      {nativeToast && (
+        <div className="bg-emerald-950/90 text-emerald-200 border-b border-emerald-800 px-3 py-1.5 text-[11px] flex items-center justify-between gap-2 shrink-0">
+          <span>{nativeToast}</span>
+          <button
+            type="button"
+            onClick={() => setNativeToast(null)}
+            className="text-emerald-400 hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Zone centrale : Viewer 3D WebGL 60 FPS + PrusaSlicer Windows natif, ou PrusaSlicer intégré sur Linux */}
+      <div className="relative flex-1 w-full h-full bg-slate-900 flex flex-col">
+        {ready && !error && mode === "native-window" && (
+          <StlViewer
+            stlUrl={`/api/orders/${orderId}/stl`}
+            filename={stlFilename}
+          />
+        )}
+
+        {ready && !error && mode === "embedded" && (
           <iframe
             key={iframeKey}
             src="/slicer-embed"
@@ -151,8 +227,8 @@ export default function PrusaSlicerEmbed({
                 Chargement de{" "}
                 <strong className="font-mono text-orange-300">
                   {stlFilename}
-                </strong>{" "}
-                dans PrusaSlicer…
+                </strong>
+                …
               </span>
             </div>
           </div>

@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import path from "node:path";
 import { getOrderById } from "@/services/orders";
-import { loadOrderInEmbeddedPrusaSlicer } from "@/lib/slicer-embed";
+import {
+  loadOrderInEmbeddedPrusaSlicer,
+  openOrderInNativePrusaSlicer,
+} from "@/lib/slicer-embed";
 
 export async function POST(
   _request: NextRequest,
@@ -31,7 +34,21 @@ export async function POST(
       );
     }
 
+    if (process.platform === "win32") {
+      await openOrderInNativePrusaSlicer({
+        orderId: id,
+        stlAbsolutePath: resolvedPath,
+        stlFilename: order.stlFilename,
+      });
+      return NextResponse.json({
+        ok: true,
+        mode: "native-window",
+        message: `${order.stlFilename} ouvert dans PrusaSlicer Windows.`,
+      });
+    }
+
     await loadOrderInEmbeddedPrusaSlicer({
+      orderId: id,
       stlAbsolutePath: resolvedPath,
       stlFilename: order.stlFilename,
       forceReload: true,
@@ -39,6 +56,7 @@ export async function POST(
 
     return NextResponse.json({
       ok: true,
+      mode: "embedded",
       message: `${order.stlFilename} chargé dans PrusaSlicer intégré.`,
     });
   } catch (error) {

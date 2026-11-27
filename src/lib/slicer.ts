@@ -68,19 +68,43 @@ export async function detectPrusaSlicer(): Promise<SlicerExecutable | null> {
     }
   }
 
-  const vendorBins = [
-    path.resolve(process.cwd(), "vendor", "prusaslicer", "prusa-slicer"),
-    path.resolve(process.cwd(), "vendor", "prusaslicer", "bin", "prusa-slicer"),
-    path.resolve(
-      process.cwd(),
-      "vendor",
-      "prusaslicer",
-      "squashfs-root",
-      "usr",
-      "bin",
-      "prusa-slicer"
-    ),
-  ];
+  const vendorBins =
+    process.platform === "win32"
+      ? [
+          path.resolve(
+            process.cwd(),
+            "vendor",
+            "prusaslicer",
+            "prusa-slicer-console.exe"
+          ),
+          path.resolve(
+            process.cwd(),
+            "vendor",
+            "prusaslicer",
+            "prusa-slicer.exe"
+          ),
+          "C:\\Program Files\\Prusa3D\\PrusaSlicer\\prusa-slicer-console.exe",
+          "C:\\Program Files\\Prusa3D\\PrusaSlicer\\prusa-slicer.exe",
+        ]
+      : [
+          path.resolve(process.cwd(), "vendor", "prusaslicer", "prusa-slicer"),
+          path.resolve(
+            process.cwd(),
+            "vendor",
+            "prusaslicer",
+            "bin",
+            "prusa-slicer"
+          ),
+          path.resolve(
+            process.cwd(),
+            "vendor",
+            "prusaslicer",
+            "squashfs-root",
+            "usr",
+            "bin",
+            "prusa-slicer"
+          ),
+        ];
   for (const vbin of vendorBins) {
     try {
       await fs.access(vbin);

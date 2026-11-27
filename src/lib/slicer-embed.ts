@@ -5,11 +5,12 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+const IS_WINDOWS = process.platform === "win32";
 const DISPLAY_NUM = ":98";
 const VNC_PORT = 5998;
 
 interface SlicerLaunchTarget {
-  kind: "native" | "flatpak";
+  kind: "windows" | "native" | "flatpak";
   command: string;
   configDir: string;
   buildArgs: (workStlPath: string) => string[];
@@ -61,6 +62,7 @@ export function getActiveSlicerSessionInfo() {
   return {
     activeOrderId: rt.activeOrderId,
     sessionOpenedAtMs: rt.sessionOpenedAtMs,
+    mode: IS_WINDOWS ? ("native-window" as const) : ("embedded" as const),
   };
 }
 
@@ -75,21 +77,63 @@ async function fileExists(p: string): Promise<boolean> {
 
 async function commandExists(bin: string): Promise<boolean> {
   try {
-    await execFileAsync("which", [bin], { timeout: 2500 });
+    await execFileAsync(IS_WINDOWS ? "where" : "which", [bin], {
+      timeout: 2500,
+    });
     return true;
   } catch {
     return false;
   }
 }
 
+async function resolveWindowsSlicerTarget(): Promise<SlicerLaunchTarget> {
+  const appData =
+    process.env.APPDATA ||
+    path.join(process.env.USERPROFILE || process.cwd(), "AppData", "Roaming");
+  const configDir = path.join(appData, "PrusaSlicer");
+
+  const candidates = [
+    process.env.PRUSA_SLICER_BIN?.trim(),
+    path.resolve(process.cwd(), "vendor", "prusaslicer", "prusa-slicer.exe"),
+    "C:\\Program Files\\Prusa3D\\PrusaSlicer\\prusa-slicer.exe",
+    "C:\\Program Files (x86)\\Prusa3D\\PrusaSlicer\\prusa-slicer.exe",
+    process.env.LOCALAPPDATA
+      ? path.join(
+          process.env.LOCALAPPDATA,
+          "Programs",
+          "Prusa3D",
+          "PrusaSlicer",
+          "prusa-slicer.exe"
+        )
+      : undefined,
+  ].filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    if (await fileExists(candidate)) {
+      return {
+        kind: "windows",
+        command: candidate,
+        configDir,
+        buildArgs: (workStlPath) => [workStlPath],
+      };
+    }
+  }
+
+  throw new Error(
+    "prusa-slicer.exe introuvable sur ce PC Windows. Lancez windows\\1-Installer-sur-Windows.bat ou installez PrusaSlicer."
+  );
+}
+
 /**
- * Détecte le vrai PrusaSlicer disponible (compatible Ubuntu natif, Flatpak ET Windows via WSL2) :
- * 1. PRUSA_SLICER_BIN (variable .env personnalisée)
- * 2. ./vendor/prusaslicer/prusa-slicer (binaire officiel 2.9 extrait dans WSL2 / Linux sans Flatpak)
- * 3. Binaire système `prusa-slicer` ou `prusaslicer`
- * 4. Flatpak officiel `com.prusa3d.PrusaSlicer`
+ * Détecte le vrai PrusaSlicer disponible (100% Windows natif ou Linux) :
+ * - Windows : ./vendor/prusaslicer/prusa-slicer.exe ou C:\Program Files\Prusa3D\PrusaSlicer\prusa-slicer.exe
+ * - Linux : ./vendor/prusaslicer/prusa-slicer, binaire système `prusa-slicer`, ou Flatpak `com.prusa3d.PrusaSlicer`
  */
 async function resolveSlicerTarget(): Promise<SlicerLaunchTarget> {
+  if (IS_WINDOWS) {
+    return resolveWindowsSlicerTarget();
+  }
+
   const home = process.env.HOME || "";
   const nativeConfigDir = path.join(home, ".config", "PrusaSlicer");
   const flatpakConfigDir = path.join(
@@ -153,7 +197,6 @@ async function resolveSlicerTarget(): Promise<SlicerLaunchTarget> {
     }
   }
 
-  // Fallback : Flatpak officiel (Linux Desktop)
   const workspaceDir = process.cwd();
   return {
     kind: "flatpak",
@@ -178,6 +221,148 @@ async function resolveSlicerTarget(): Promise<SlicerLaunchTarget> {
     ],
   };
 }
+
+/**
+ * Installe automatiquement le profil embarqué `Original Prusa MK4S 0.4 nozzle bon.ini`
+ * et pointe les exports G-code directement vers ./data/gcode (Windows & Linux).
+ */
+async function tunePrusaSlicerIni(configRoot: string): Promise<void> {
+  const gcodeDir = path.resolve(process.cwd(), "data", "gcode");
+  const iniPath = path.join(configRoot, "PrusaSlicer.ini");
+  const printerDir = path.join(configRoot, "printer");
+  const customPrinterIni = path.join(
+    printerDir,
+    "Original Prusa MK4S 0.4 nozzle bon.ini"
+  );
+  const repoBundledPrinterIni = path.resolve(
+    process.cwd(),
+    "config",
+    "prusaslicer",
+    "printer",
+    "Original Prusa MK4S 0.4 nozzle bon.ini"
+  );
+
+  await fs.mkdir(printerDir, { recursive: true }).catch(() => {});
+  if (
+    !(await fileExists(customPrinterIni)) &&
+    (await fileExists(repoBundledPrinterIni))
+  ) {
+    await fs.copyFile(repoBundledPrinterIni, customPrinterIni).catch(() => {});
+  }
+
+  const hasCustomPrinter = await fileExists(customPrinterIni);
+
+  try {
+    let content = await fs.readFile(iniPath, "utf-8");
+    const replacements: [RegExp, string][] = [
+      [/^show_splash_screen\s*=.*$/m, "show_splash_screen = 0"],
+      [/^show_hints\s*=.*$/m, "show_hints = 0"],
+      [/^notify_release\s*=.*$/m, "notify_release = none"],
+      [/^preset_update\s*=.*$/m, "preset_update = 0"],
+      [/^auth_login_dialog_confirmed\s*=.*$/m, "auth_login_dialog_confirmed = 1"],
+      [/^skein_directory\s*=.*$/m, `skein_directory = ${gcodeDir}`],
+      [/^last_output_path\s*=.*$/m, `last_output_path = ${gcodeDir}`],
+      ...(hasCustomPrinter
+        ? ([
+            [/^printer\s*=.*$/m, "printer = Original Prusa MK4S 0.4 nozzle bon"],
+            [/^print\s*=.*$/m, "print = 0.20mm SPEED @MK4S 0.4"],
+            [/^filament\s*=.*$/m, "filament = Prusament PLA @MK4S"],
+          ] as [RegExp, string][])
+        : []),
+    ];
+
+    let changed = false;
+    for (const [regex, nextLine] of replacements) {
+      if (regex.test(content)) {
+        const updated = content.replace(regex, nextLine);
+        if (updated !== content) {
+          content = updated;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      await fs.writeFile(iniPath, content, "utf-8");
+    }
+  } catch {
+    const freshIni = [
+      "show_splash_screen = 0",
+      "show_hints = 0",
+      "notify_release = none",
+      "preset_update = 0",
+      "auth_login_dialog_confirmed = 1",
+      "use_binary_gcode_when_supported = 1",
+      "background_processing = 0",
+      "remember_output_path = 1",
+      "",
+      "[presets]",
+      ...(hasCustomPrinter
+        ? [
+            "printer = Original Prusa MK4S 0.4 nozzle bon",
+            "print = 0.20mm SPEED @MK4S 0.4",
+            "filament = Prusament PLA @MK4S",
+          ]
+        : []),
+      "",
+      "[recent]",
+      `skein_directory = ${gcodeDir}`,
+      `last_output_path = ${gcodeDir}`,
+      "",
+      "[vendor:PrusaResearch]",
+      "model:MK4S = 0.4",
+      "",
+    ].join("\n");
+    await fs.writeFile(iniPath, freshIni, "utf-8").catch(() => {});
+  }
+}
+
+async function prepareWorkStl(
+  stlAbsolutePath: string,
+  stlFilename: string
+): Promise<string> {
+  const gcodeDir = path.resolve(process.cwd(), "data", "gcode");
+  await fs.mkdir(gcodeDir, { recursive: true });
+  const cleanName = stlFilename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const workStlPath = path.join(gcodeDir, cleanName);
+  await fs.copyFile(stlAbsolutePath, workStlPath);
+  return workStlPath;
+}
+
+/**
+ * Ouvre le STL directement dans le vrai PrusaSlicer Windows (fenêtre native 60 FPS GPU)
+ * et enregistre l'heure de session pour la synchro automatique du poids PLA à l'export G-code.
+ */
+export async function openOrderInNativePrusaSlicer(params: {
+  orderId?: string;
+  stlAbsolutePath: string;
+  stlFilename: string;
+}): Promise<{ mode: "native-window"; command: string }> {
+  const runtime = getRuntime();
+  const target = await resolveSlicerTarget();
+  const workStlPath = await prepareWorkStl(
+    params.stlAbsolutePath,
+    params.stlFilename
+  );
+
+  await tunePrusaSlicerIni(target.configDir);
+
+  const proc = spawn(target.command, target.buildArgs(workStlPath), {
+    stdio: "ignore",
+    detached: true,
+    windowsHide: false,
+  });
+  proc.unref();
+
+  runtime.slicerProc = proc;
+  runtime.currentStlPath = params.stlAbsolutePath;
+  runtime.activeOrderId = params.orderId ?? runtime.activeOrderId;
+  runtime.sessionOpenedAtMs = Date.now();
+
+  return { mode: "native-window", command: path.basename(target.command) };
+}
+
+/* ==================== PARTIE LINUX EMBARQUÉE (Xtigervnc :98) ==================== */
 
 async function isXDisplayReady(): Promise<boolean> {
   try {
@@ -320,6 +505,7 @@ async function listSlicerWindows(): Promise<{
 }
 
 export async function fitSlicerWindows(): Promise<boolean> {
+  if (IS_WINDOWS) return false;
   const runtime = getRuntime();
   if (runtime.fittingInFlight) return false;
   runtime.fittingInFlight = true;
@@ -446,125 +632,42 @@ async function killRunningPrusaSlicerOnDisplay(
   }
 }
 
-/**
- * Installe automatiquement le profil embarqué `Original Prusa MK4S 0.4 nozzle bon.ini`
- * si absent (pratique sur un nouveau PC Windows/WSL2) et règle les préférences rapides.
- */
-async function tunePrusaSlicerIni(configRoot: string): Promise<void> {
-  const gcodeDir = path.resolve(process.cwd(), "data", "gcode");
-  const iniPath = path.join(configRoot, "PrusaSlicer.ini");
-  const printerDir = path.join(configRoot, "printer");
-  const customPrinterIni = path.join(
-    printerDir,
-    "Original Prusa MK4S 0.4 nozzle bon.ini"
-  );
-  const repoBundledPrinterIni = path.resolve(
-    process.cwd(),
-    "config",
-    "prusaslicer",
-    "printer",
-    "Original Prusa MK4S 0.4 nozzle bon.ini"
-  );
-
-  await fs.mkdir(printerDir, { recursive: true }).catch(() => {});
-  if (
-    !(await fileExists(customPrinterIni)) &&
-    (await fileExists(repoBundledPrinterIni))
-  ) {
-    await fs.copyFile(repoBundledPrinterIni, customPrinterIni).catch(() => {});
-  }
-
-  const hasCustomPrinter = await fileExists(customPrinterIni);
-
-  try {
-    let content = await fs.readFile(iniPath, "utf-8");
-    const replacements: [RegExp, string][] = [
-      [/^show_splash_screen\s*=.*$/m, "show_splash_screen = 0"],
-      [/^show_hints\s*=.*$/m, "show_hints = 0"],
-      [/^notify_release\s*=.*$/m, "notify_release = none"],
-      [/^preset_update\s*=.*$/m, "preset_update = 0"],
-      [/^auth_login_dialog_confirmed\s*=.*$/m, "auth_login_dialog_confirmed = 1"],
-      [/^skein_directory\s*=.*$/m, `skein_directory = ${gcodeDir}`],
-      [/^last_output_path\s*=.*$/m, `last_output_path = ${gcodeDir}`],
-      ...(hasCustomPrinter
-        ? ([
-            [/^printer\s*=.*$/m, "printer = Original Prusa MK4S 0.4 nozzle bon"],
-            [/^print\s*=.*$/m, "print = 0.20mm SPEED @MK4S 0.4"],
-            [/^filament\s*=.*$/m, "filament = Prusament PLA @MK4S"],
-          ] as [RegExp, string][])
-        : []),
-    ];
-
-    let changed = false;
-    for (const [regex, nextLine] of replacements) {
-      if (regex.test(content)) {
-        const updated = content.replace(regex, nextLine);
-        if (updated !== content) {
-          content = updated;
-          changed = true;
-        }
-      }
-    }
-
-    if (changed) {
-      await fs.writeFile(iniPath, content, "utf-8");
-    }
-  } catch {
-    // Crée un PrusaSlicer.ini initial propre lors du tout premier démarrage (ex: WSL2 neuf)
-    const freshIni = [
-      "show_splash_screen = 0",
-      "show_hints = 0",
-      "notify_release = none",
-      "preset_update = 0",
-      "auth_login_dialog_confirmed = 1",
-      "use_binary_gcode_when_supported = 1",
-      "background_processing = 0",
-      "remember_output_path = 1",
-      "",
-      "[presets]",
-      ...(hasCustomPrinter
-        ? [
-            "printer = Original Prusa MK4S 0.4 nozzle bon",
-            "print = 0.20mm SPEED @MK4S 0.4",
-            "filament = Prusament PLA @MK4S",
-          ]
-        : []),
-      "",
-      "[recent]",
-      `skein_directory = ${gcodeDir}`,
-      `last_output_path = ${gcodeDir}`,
-      "",
-      "[vendor:PrusaResearch]",
-      "model:MK4S = 0.4",
-      "",
-    ].join("\n");
-    await fs.writeFile(iniPath, freshIni, "utf-8").catch(() => {});
-  }
-}
-
 export async function loadOrderInEmbeddedPrusaSlicer(params: {
   orderId?: string;
   stlAbsolutePath: string;
   stlFilename: string;
   forceReload?: boolean;
-}): Promise<{ reloaded: boolean }> {
+}): Promise<{ mode: "embedded" | "native-window"; reloaded: boolean }> {
   const runtime = getRuntime();
+
+  // Sur Windows natif : pas besoin de Xtigervnc/Linux — on prépare le STL et la session
+  // pour le viewer 3D WebGL + bouton "Ouvrir dans PrusaSlicer Windows" (et on ouvre auto si forceReload)
+  if (IS_WINDOWS) {
+    if (params.orderId && runtime.activeOrderId !== params.orderId) {
+      runtime.activeOrderId = params.orderId;
+      runtime.sessionOpenedAtMs = Date.now();
+    }
+    if (params.forceReload) {
+      await openOrderInNativePrusaSlicer(params);
+      return { mode: "native-window", reloaded: true };
+    }
+    await prepareWorkStl(params.stlAbsolutePath, params.stlFilename);
+    return { mode: "native-window", reloaded: false };
+  }
+
   const mySeq = ++runtime.latestRequestSeq;
 
-  const task = async (): Promise<{ reloaded: boolean }> => {
+  const task = async (): Promise<{ mode: "embedded"; reloaded: boolean }> => {
     if (mySeq < runtime.latestRequestSeq) {
-      return { reloaded: false };
+      return { mode: "embedded", reloaded: false };
     }
 
     await ensureDisplay();
     const target = await resolveSlicerTarget();
-
-    const gcodeDir = path.resolve(process.cwd(), "data", "gcode");
-    await fs.mkdir(gcodeDir, { recursive: true });
-
-    const cleanName = params.stlFilename.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const workStlPath = path.join(gcodeDir, cleanName);
-    await fs.copyFile(params.stlAbsolutePath, workStlPath);
+    const workStlPath = await prepareWorkStl(
+      params.stlAbsolutePath,
+      params.stlFilename
+    );
 
     const existing = await listSlicerWindows();
     const isWindowAlive = Boolean(existing && existing.windows.length > 0);
@@ -579,14 +682,14 @@ export async function loadOrderInEmbeddedPrusaSlicer(params: {
         runtime.sessionOpenedAtMs = Date.now();
       }
       await fitSlicerWindows().catch(() => {});
-      return { reloaded: false };
+      return { mode: "embedded", reloaded: false };
     }
 
     await killRunningPrusaSlicerOnDisplay(target);
     await tunePrusaSlicerIni(target.configDir);
 
     if (mySeq < runtime.latestRequestSeq) {
-      return { reloaded: false };
+      return { mode: "embedded", reloaded: false };
     }
 
     const cleanEnv: NodeJS.ProcessEnv = {
@@ -620,7 +723,7 @@ export async function loadOrderInEmbeddedPrusaSlicer(params: {
       await new Promise((r) => setTimeout(r, 300));
     }
 
-    return { reloaded: true };
+    return { mode: "embedded", reloaded: true };
   };
 
   const chained = runtime.loadLock.then(task, task);

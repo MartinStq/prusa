@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { reloaded } = await loadOrderInEmbeddedPrusaSlicer({
+    const { mode, reloaded } = await loadOrderInEmbeddedPrusaSlicer({
       orderId,
       stlAbsolutePath: resolvedPath,
       stlFilename: order.stlFilename,
@@ -46,6 +46,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       ok: true,
+      mode,
       reloaded,
       stlFilename: order.stlFilename,
     });

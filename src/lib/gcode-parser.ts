@@ -113,20 +113,39 @@ export async function parsePrusaGcodeMetadata(
 }
 
 async function getPrusaSlicerLastOutputDir(): Promise<string | null> {
-  const home = process.env.HOME;
-  if (!home) return null;
-  const candidates = [
-    path.join(
-      home,
-      ".var",
-      "app",
-      "com.prusa3d.PrusaSlicer",
-      "config",
-      "PrusaSlicer",
-      "PrusaSlicer.ini"
-    ),
-    path.join(home, ".config", "PrusaSlicer", "PrusaSlicer.ini"),
-  ];
+  const candidates: string[] = [];
+
+  if (process.env.APPDATA) {
+    candidates.push(
+      path.join(process.env.APPDATA, "PrusaSlicer", "PrusaSlicer.ini")
+    );
+  }
+  if (process.env.USERPROFILE) {
+    candidates.push(
+      path.join(
+        process.env.USERPROFILE,
+        "AppData",
+        "Roaming",
+        "PrusaSlicer",
+        "PrusaSlicer.ini"
+      )
+    );
+  }
+  if (process.env.HOME) {
+    candidates.push(
+      path.join(
+        process.env.HOME,
+        ".var",
+        "app",
+        "com.prusa3d.PrusaSlicer",
+        "config",
+        "PrusaSlicer",
+        "PrusaSlicer.ini"
+      ),
+      path.join(process.env.HOME, ".config", "PrusaSlicer", "PrusaSlicer.ini")
+    );
+  }
+
   for (const iniPath of candidates) {
     try {
       const content = await fs.readFile(iniPath, "utf-8");
