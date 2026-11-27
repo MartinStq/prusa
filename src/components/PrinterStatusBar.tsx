@@ -17,6 +17,7 @@ import {
   Plus,
   Printer,
   RefreshCw,
+  Settings,
   Volume2,
   VolumeX,
   Wifi,
@@ -159,6 +160,13 @@ export default function PrinterStatusBar({
   const [status, setStatus] = useState<PrinterStatusPayload | null>(null);
   const [simMenuOpen, setSimMenuOpen] = useState(false);
   const [simulating, setSimulating] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [cfgIp, setCfgIp] = useState("");
+  const [cfgUser, setCfgUser] = useState("maker");
+  const [cfgKey, setCfgKey] = useState("");
+  const [cfgHasKey, setCfgHasKey] = useState(false);
+  const [cfgSaving, setCfgSaving] = useState(false);
+  const [cfgFeedback, setCfgFeedback] = useState<string | null>(null);
   const [activeBanner, setActiveBanner] = useState<{
     key: string;
     alert: PrinterAlert;
@@ -374,6 +382,64 @@ export default function PrinterStatusBar({
     if (typeof window === "undefined" || !("Notification" in window)) return;
     const perm = await Notification.requestPermission();
     setDesktopPerm(perm);
+  };
+
+  const handleOpenConfig = async () => {
+    const nextOpen = !configOpen;
+    setConfigOpen(nextOpen);
+    setBellOpen(false);
+    setSimMenuOpen(false);
+    setCfgFeedback(null);
+    if (nextOpen) {
+      try {
+        const res = await fetch("/api/printer/config", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          setCfgIp(data.prusaIp ?? "");
+          setCfgUser(data.prusaUser ?? "maker");
+          setCfgHasKey(Boolean(data.hasApiKey));
+          setCfgKey("");
+        }
+      } catch {
+        // Ignore
+      }
+    }
+  };
+
+  const handleSaveConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCfgSaving(true);
+    setCfgFeedback(null);
+    try {
+      const res = await fetch("/api/printer/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prusaIp: cfgIp,
+          prusaUser: cfgUser,
+          prusaApiKey: cfgKey,
+          mock: false,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "Erreur de sauvegarde.");
+      }
+      if (data.status) setStatus(data.status);
+      setCfgHasKey(Boolean(data.config?.hasApiKey));
+      setCfgKey("");
+      setCfgFeedback(
+        data.status?.state && data.status.state !== "OFFLINE"
+          ? `Connecté (${data.status.state}) — .env mis à jour !`
+          : "Enregistré dans .env (imprimante actuellement hors ligne)."
+      );
+    } catch (err) {
+      setCfgFeedback(
+        err instanceof Error ? err.message : "Erreur lors de l'enregistrement."
+      );
+    } finally {
+      setCfgSaving(false);
+    }
   };
 
   const handleSimulateTestAlert = () => {
@@ -684,6 +750,94 @@ export default function PrinterStatusBar({
                     )}
                   </div>
                 </div>
+              )}
+            </div>
+
+            {/* Paramètres PrusaLink (.env modifiable à chaud depuis le navigateur) */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={handleOpenConfig}
+                title="Configurer IP et mot de passe PrusaLink (.env)"
+                className="p-2 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition"
+              >
+                <Settings className="h-4 w-4" />
+              </button>
+
+              {configOpen && (
+                <form
+                  onSubmit={handleSaveConfig}
+                  className="absolute right-0 mt-2 w-72 rounded-xl bg-white text-slate-900 shadow-2xl border border-slate-200 overflow-hidden z-50 text-xs"
+                >
+                  <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                    <span className="font-semibold text-slate-900">
+                      Connexion PrusaLink (.env)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setConfigOpen(false)}
+                      className="text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <div className="p-3.5 space-y-2.5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 mb-0.5">
+                        Adresse IP Prusa
+                      </label>
+                      <input
+                        type="text"
+                        value={cfgIp}
+                        onChange={(e) => setCfgIp(e.target.value)}
+                        placeholder="192.168.0.17"
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 font-mono text-xs focus:border-orange-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 mb-0.5">
+                        Utilisateur PrusaLink
+                      </label>
+                      <input
+                        type="text"
+                        value={cfgUser}
+                        onChange={(e) => setCfgUser(e.target.value)}
+                        placeholder="maker"
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 font-mono text-xs focus:border-orange-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 mb-0.5">
+                        Mot de passe / Clé API PrusaLink
+                      </label>
+                      <input
+                        type="password"
+                        value={cfgKey}
+                        onChange={(e) => setCfgKey(e.target.value)}
+                        placeholder={
+                          cfgHasKey
+                            ? "•••••••• (vide = conserver l'actuel)"
+                            : "Ex : svxACSVfTP3r9dw"
+                        }
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 font-mono text-xs focus:border-orange-500 focus:outline-none"
+                      />
+                    </div>
+                    {cfgFeedback && (
+                      <div className="rounded bg-slate-100 px-2.5 py-1.5 text-[11px] text-slate-700">
+                        {cfgFeedback}
+                      </div>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={cfgSaving}
+                      className="w-full rounded-md bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white font-semibold py-2 transition"
+                    >
+                      {cfgSaving
+                        ? "Test et enregistrement…"
+                        : "Enregistrer et connecter"}
+                    </button>
+                  </div>
+                </form>
               )}
             </div>
 
