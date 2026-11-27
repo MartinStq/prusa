@@ -15,8 +15,13 @@ prisma/*.db-journal
 
 # Local 3D print files (generated / uploaded)
 /data/stl/*.stl
+/data/gcode/*.stl
 /data/gcode/*.gcode
 /data/gcode/*.bgcode
+/data/gcode/sent/
+
+# Local extracted PrusaSlicer binary (WSL2 / Linux)
+/vendor/
 
 # Misc
 .DS_Store

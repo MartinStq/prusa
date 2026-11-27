@@ -68,6 +68,33 @@ export async function detectPrusaSlicer(): Promise<SlicerExecutable | null> {
     }
   }
 
+  const vendorBins = [
+    path.resolve(process.cwd(), "vendor", "prusaslicer", "prusa-slicer"),
+    path.resolve(process.cwd(), "vendor", "prusaslicer", "bin", "prusa-slicer"),
+    path.resolve(
+      process.cwd(),
+      "vendor",
+      "prusaslicer",
+      "squashfs-root",
+      "usr",
+      "bin",
+      "prusa-slicer"
+    ),
+  ];
+  for (const vbin of vendorBins) {
+    try {
+      await fs.access(vbin);
+      return {
+        kind: "native",
+        command: vbin,
+        baseArgs: [],
+        label: "PrusaSlicer (local)",
+      };
+    } catch {
+      // Continue
+    }
+  }
+
   for (const bin of ["prusa-slicer", "prusaslicer"]) {
     if (await commandExists(bin)) {
       return {
